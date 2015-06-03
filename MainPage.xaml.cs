@@ -13,14 +13,9 @@ using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Media.Imaging;
 using WindowsPreview.Kinect;
 using Microsoft.Kinect.Face;
-
 using System;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows;
-//using System.Windows.Media;
-using Microsoft.Kinect;
-using Microsoft.Kinect.Face;
 
 
 namespace Microsoft.Samples.Kinect.FaceBasics
@@ -30,10 +25,6 @@ namespace Microsoft.Samples.Kinect.FaceBasics
     /// </summary>
     public sealed partial class MainPage : Page, INotifyPropertyChanged
     {
-        /// <summary>
-        /// 深度データを、バイトデータに変換する際に使用します。
-        /// </summary>
-        private const int MapDepthToByte = 8000 / 256;
 
 #if WIN81ORLATER
         private ResourceLoader resourceLoader = ResourceLoader.GetForCurrentView("Resources");
@@ -42,35 +33,13 @@ namespace Microsoft.Samples.Kinect.FaceBasics
 #endif
 
 
-        /// <summary>
-        /// ビットマップ形式のデータを格納する際、インデックスに使用します。
-        /// </summary>
-        private readonly int cbytesPerPixel = 4;
+       
 
         /// <summary>
         ///  Kinect センサー本体を扱うためのフィールドです。
         /// </summary>
         private KinectSensor kinectSensor = null;
 
-        /// <summary>
-        /// 深度センサーから届くフレームを扱うためのフィールドです。
-        /// </summary>
-        private DepthFrameReader depthFrameReader = null;
-
-        /// <summary>
-        /// ビットマップ形式のデータを画面上に表示させるためのフィールドです。
-        /// </summary>
-        private WriteableBitmap bitmap = null;
-
-        /// <summary>
-        /// Kinect センサーが取得した、フレームの深度データが格納されるフィールドです。
-        /// </summary>
-        private ushort[] depthFrameData = null;
-
-        /// <summary>
-        /// 深度フレームの情報を RGB に変換されたデータが格納されるフィールドです。
-        /// </summary>
-        private byte[] depthPixels = null;
 
         /// <summary>
         /// アプリが適切に動作しているものかを表示するための情報を扱います。
@@ -78,52 +47,309 @@ namespace Microsoft.Samples.Kinect.FaceBasics
         private string statusText = null;
 
         //ここから Sheda Added
+        /// <summary>
+        /// Face rotation display angle increment in degrees
+        /// </summary>
+        private const double FaceRotationIncrementInDegrees = 5.0;
 
-        public MainPage()
+        /// <summary>
+        /// Reader for body frames
+        /// </summary>
+        private BodyFrameReader bodyFrameReader = null;
+
+        /// <summary>
+        /// Array to store bodies
+        /// </summary>
+        private Body[] bodies = null;
+
+        /// <summary>
+        /// Number of bodies tracked
+        /// </summary>
+        private int bodyCount;
+
+        /// <summary>
+        /// Face frame source
+        /// </summary>
+        private FaceFrameSource faceFrameSource = null;
+        /// <summary>
+        /// Face frame reader
+        /// </summary>
+        private FaceFrameReader faceFrameReader = null;
+
+
+        /// <summary>
+        /// Storage for face frame results
+        /// </summary>
+        private FaceFrameResult faceFrameResult = null;
+
+        /// <summary>
+        /// Width of display (color space)
+        /// </summary>
+        private int displayWidth;
+
+        /// <summary>
+        /// Height of display (color space)
+        /// </summary>
+        private int displayHeight;
+
+
+        public MainPage() 
         {
-            // Kinect センサー V2 ののオブジェクトを取得します。
+
+            // one sensor is currently supported
             this.kinectSensor = KinectSensor.GetDefault();
 
-            // 深度フレームに関する情報が格納されたオブジェクトを取得します。
-            FrameDescription depthFrameDescription = this.kinectSensor.DepthFrameSource.FrameDescription;
+            // get the color frame details
+            FrameDescription frameDescription = this.kinectSensor.ColorFrameSource.FrameDescription;
 
-            // 深度フレームを読み込むための Reader を開きます。
-            this.depthFrameReader = this.kinectSensor.DepthFrameSource.OpenReader();
+            // set the display specifics
+            this.displayWidth = frameDescription.Width;
+            this.displayHeight = frameDescription.Height;
 
-            // 深度情報が格納されたフレームが到着したことを示すイベント "FrameArrived" が発生した際に
-            // "Reader_DepthFrameArrived" の処理が実行されるようにイベントハンドラを登録します。
-            this.depthFrameReader.FrameArrived += this.Reader_DepthFrameArrived;
+            // open the reader for the body frames
+            this.bodyFrameReader = this.kinectSensor.BodyFrameSource.OpenReader();
 
-            // 512 × 424 サイズの配列を定義します。
-            this.depthFrameData = new ushort[depthFrameDescription.Width * depthFrameDescription.Height];
-            this.depthPixels = new byte[depthFrameDescription.Width * depthFrameDescription.Height * this.cbytesPerPixel];
+            // wire handler for body frame arrival
+            this.bodyFrameReader.FrameArrived += this.Reader_BodyFrameArrived;
 
-            // ディスプレイに出力するための ビットマップデータを出力します。
-            this.bitmap = new WriteableBitmap(depthFrameDescription.Width, depthFrameDescription.Height);//, 96.0, 96.0, PixelFormats.Bgr32, null);
+            // set the maximum number of bodies that would be tracked by Kinect
+            this.bodyCount = this.kinectSensor.BodyFrameSource.BodyCount;
 
-            // Kinect センサーについて (USB 接続が切れてしまった等) 変化した場合に
-            // "Sensor_IsAvailableChanged" の処理が実行されるようにイベントハンドラを登録します。
-            this.kinectSensor.IsAvailableChanged += this.Sensor_IsAvailableChanged;
+            // allocate storage to store body objects
+            this.bodies = new Body[this.bodyCount];
 
+            // specify the required face frame results
+            FaceFrameFeatures faceFrameFeatures =
+                FaceFrameFeatures.BoundingBoxInColorSpace
+                | FaceFrameFeatures.PointsInColorSpace
+                | FaceFrameFeatures.RotationOrientation
+                | FaceFrameFeatures.FaceEngagement
+                | FaceFrameFeatures.Glasses
+                | FaceFrameFeatures.Happy
+                | FaceFrameFeatures.LeftEyeClosed
+                | FaceFrameFeatures.RightEyeClosed
+                | FaceFrameFeatures.LookingAway
+                | FaceFrameFeatures.MouthMoved
+                | FaceFrameFeatures.MouthOpen;
 
-            // Kinect Sensor の処理を開始します。
+            // create a face frame source + reader to track each face in the FOV
+            this.faceFrameSource = new FaceFrameSource(this.kinectSensor, 0, faceFrameFeatures);
+            this.faceFrameReader = this.faceFrameSource.OpenReader();
+
+            // open the sensor
             this.kinectSensor.Open();
 
-            // Kinect センサーが適切に動作しているものかを表示します。(アプリの画面左下に表示されます。)
-            this.StatusText = this.kinectSensor.IsAvailable ? resourceLoader.GetString("RunningStatusText")
-                                                            : resourceLoader.GetString("NoSensorStatusText");
-
-            // View Model として、扱えるように DataContext に MainPage クラスを指定します。
-            this.DataContext = this;
-
-            // アプリの起動に必要な初期化処理を実行します。
+            // initialize the components (controls) of the window
             this.InitializeComponent();
+
         }
 
         /// <summary>
         /// INotifyPropertyChangedPropertyChanged を用いて、プロパティの変更を画面コントロールに通知します。 
         /// </summary>
         public event PropertyChangedEventHandler PropertyChanged;
+
+        /// <summary>
+        /// Converts rotation quaternion to Euler angles 
+        /// And then maps them to a specified range of values to control the refresh rate
+        /// </summary>
+        /// <param name="rotQuaternion">face rotation quaternion</param>
+        /// <param name="pitch">rotation about the X-axis</param>
+        /// <param name="yaw">rotation about the Y-axis</param>
+        /// <param name="roll">rotation about the Z-axis</param>
+        private static void ExtractFaceRotationInDegrees(Vector4 rotQuaternion, out int pitch, out int yaw, out int roll)
+        {
+            double x = rotQuaternion.X;
+            double y = rotQuaternion.Y;
+            double z = rotQuaternion.Z;
+            double w = rotQuaternion.W;
+
+            // convert face rotation quaternion to Euler angles in degrees
+            double yawD, pitchD, rollD;
+            pitchD = Math.Atan2(2 * ((y * z) + (w * x)), (w * w) - (x * x) - (y * y) + (z * z)) / Math.PI * 180.0;
+            yawD = Math.Asin(2 * ((w * y) - (x * z))) / Math.PI * 180.0;
+            rollD = Math.Atan2(2 * ((x * y) + (w * z)), (w * w) + (x * x) - (y * y) - (z * z)) / Math.PI * 180.0;
+
+            // clamp the values to a multiple of the specified increment to control the refresh rate
+            double increment = FaceRotationIncrementInDegrees;
+            pitch = (int)(Math.Floor((pitchD + ((increment / 2.0) * (pitchD > 0 ? 1.0 : -1.0))) / increment) * increment);
+            yaw = (int)(Math.Floor((yawD + ((increment / 2.0) * (yawD > 0 ? 1.0 : -1.0))) / increment) * increment);
+            roll = (int)(Math.Floor((rollD + ((increment / 2.0) * (rollD > 0 ? 1.0 : -1.0))) / increment) * increment);
+        }
+
+
+
+        private void Page_Loaded(object sender, RoutedEventArgs e)
+        {
+            this.faceFrameReader.FrameArrived += this.Reader_FaceFrameArrived;
+
+            if (this.bodyFrameReader != null)
+            {
+                // wire handler for body frame arrival
+                this.bodyFrameReader.FrameArrived += this.Reader_BodyFrameArrived;
+            }
+        }
+
+        /// <summary>
+        /// Handles the face frame data arriving from the sensor
+        /// </summary>
+        /// <param name="sender">object sending the event</param>
+        /// <param name="e">event arguments</param>
+        private void Reader_FaceFrameArrived(object sender, FaceFrameArrivedEventArgs e)
+        {
+            using (FaceFrame faceFrame = e.FrameReference.AcquireFrame())
+            {
+                if (faceFrame != null)
+                {
+                    // check if this face frame has valid face frame results
+                    if (this.ValidateFaceBoxAndPoints(faceFrame.FaceFrameResult))
+                    {
+                        // store this face frame result to draw later
+                        this.faceFrameResult = faceFrame.FaceFrameResult;
+                    }
+                    else
+                    {
+                        // indicates that the latest face frame result from this reader is invalid
+                        this.faceFrameResult = null;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns the index of the face frame source
+        /// </summary>
+        /// <param name="faceFrameSource">the face frame source</param>
+        /// <returns>the index of the face source in the face source array</returns>
+
+        /// <summary>
+        /// Handles the body frame data arriving from the sensor
+        /// </summary>
+        /// <param name="sender">object sending the event</param>
+        /// <param name="e">event arguments</param>
+        private void Reader_BodyFrameArrived(object sender, BodyFrameArrivedEventArgs e)
+        {
+            using (var bodyFrame = e.FrameReference.AcquireFrame())
+            {
+                if (bodyFrame != null)
+                {
+                    // update body data
+                    bodyFrame.GetAndRefreshBodyData(this.bodies);
+
+                    // check if a valid face is tracked in this face source
+                    if (this.faceFrameSource.IsTrackingIdValid)
+                    {
+                        // check if we have valid face frame results
+                        if (this.faceFrameResult != null)
+                        {
+                            // draw face frame results
+                            this.DrawFaceFrameResults(this.faceFrameResult);
+                        }
+                    }
+                    else
+                    {
+                        // check if the corresponding body is tracked 
+                        for (int i = 0; i < this.bodyCount; i++)
+                        {
+                            if (this.bodies[i].IsTracked)
+                            {
+                                // update the face frame source to track this body
+                                this.faceFrameSource.TrackingId = this.bodies[i].TrackingId;
+                                break;
+                            }
+                        }
+                    }
+
+                }
+            }
+        }
+
+        /// <summary>
+        /// Draws face frame results
+        /// </summary>
+        /// <param name="faceIndex">the index of the face frame corresponding to a specific body in the FOV</param>
+        /// <param name="faceResult">container of all face frame results</param>
+        /// <param name="drawingContext">drawing context to render to</param>
+        private void DrawFaceFrameResults(FaceFrameResult faceResult)
+        {
+            Debug.WriteLine("");
+            // extract each face property information and store it in faceText
+            if (faceResult.FaceProperties != null)
+            {
+                foreach (var item in faceResult.FaceProperties)
+                {
+                    // consider a "maybe" as a "no" to restrict 
+                    // the detection result refresh rate
+                    if (item.Value == DetectionResult.Maybe)
+                    {
+                        Debug.WriteLine(item.Key.ToString() + " : " + DetectionResult.No);
+                    }
+                    else
+                    {
+                        Debug.WriteLine(item.Key.ToString() + " : " + item.Value.ToString());
+                    }
+                }
+            }
+
+            // extract face rotation in degrees as Euler angles
+            if (!faceResult.FaceRotationQuaternion.Equals(null))
+            {
+                int pitch, yaw, roll;
+                ExtractFaceRotationInDegrees(faceResult.FaceRotationQuaternion, out pitch, out yaw, out roll);
+                Debug.WriteLine("FaceYaw : " + yaw);
+                Debug.WriteLine("FacePitch : " + pitch);
+                Debug.WriteLine("FacenRoll : " + roll);
+            }
+        }
+
+        /// <summary>
+        /// Validates face bounding box and face points to be within screen space
+        /// </summary>
+        /// <param name="faceResult">the face frame result containing face box and points</param>
+        /// <returns>success or failure</returns>
+        private bool ValidateFaceBoxAndPoints(FaceFrameResult faceResult)
+        {
+            bool isFaceValid = faceResult != null;
+
+            if (isFaceValid)
+            {
+                var faceBox = faceResult.FaceBoundingBoxInColorSpace;
+                if (!faceBox.Equals(null) )
+                {
+                    // check if we have a valid rectangle within the bounds of the screen space
+                    isFaceValid = (faceBox.Right - faceBox.Left) > 0 &&
+                                  (faceBox.Bottom - faceBox.Top) > 0 &&
+                                  faceBox.Right <= this.displayWidth &&
+                                  faceBox.Bottom <= this.displayHeight;
+
+                    if (isFaceValid)
+                    {
+                        var facePoints = faceResult.FacePointsInColorSpace;
+                        if (facePoints != null)
+                        {
+                            foreach (/*PointF*/ var pointF in facePoints.Values)
+                            {
+                                // check if we have a valid face point within the bounds of the screen space
+                                bool isFacePointValid = pointF.X > 0.0f &&
+                                                        pointF.Y > 0.0f &&
+                                                        pointF.X < this.displayWidth &&
+                                                        pointF.Y < this.displayHeight;
+
+                                if (!isFacePointValid)
+                                {
+                                    isFaceValid = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return isFaceValid;
+        }
+
+
+   
 
         /// <summary>
         /// 現在の Kinect センサーの状態を表示するためのプロパティです。
@@ -149,123 +375,6 @@ namespace Microsoft.Samples.Kinect.FaceBasics
         }
 
         /// <summary>
-        /// MainPage のシャットダウンの処理です。
-        /// </summary>
-        /// <param name="sender">object sending the event</param>
-        /// <param name="e">event arguments</param>
-        private void MainPage_Unloaded(object sender, RoutedEventArgs e)
-        {
-            if (this.depthFrameReader != null)
-            {
-                // DepthFrameReader の オブジェクトを解放します。
-                this.depthFrameReader.Dispose();
-                this.depthFrameReader = null;
-            }
-
-            if (this.kinectSensor != null)
-            {
-                // Kinect センサーの処理を終了します。
-                this.kinectSensor.Close();
-                this.kinectSensor = null;
-            }
-        }
-
-        /// <summary>
-        /// 深度センサーからフレームが到着した際に呼びされるイベントハンドラーです。
-        /// </summary>
-        /// <param name="sender">object sending the event</param>
-        /// <param name="e">event arguments</param>
-        private void Reader_DepthFrameArrived(object sender, DepthFrameArrivedEventArgs e)
-        {
-            ushort minDepth = 0;
-            ushort maxDepth = 0;
-
-            bool depthFrameProcessed = false;
-            
-            using (DepthFrame depthFrame = e.FrameReference.AcquireFrame())
-            {
-                // 到着したフレームが存在する場合に処理を継続します。
-                if (depthFrame != null)
-                {
-                    // 深度フレームを読み込むための Reader を開きます。                    
-                    FrameDescription depthFrameDescription = depthFrame.FrameDescription;
-
-                    // 到着した深度フレームのサイズ縦横のサイズと、用意した depthFrameDescription が持つ縦横比が一致しているか確認します。
-                    if (((depthFrameDescription.Width * depthFrameDescription.Height) == this.depthFrameData.Length) &&
-                        (depthFrameDescription.Width == this.bitmap.PixelWidth) && (depthFrameDescription.Height == this.bitmap.PixelHeight))
-                    {
-
-                        // 深度フレームのデータを、コピーし、配列に格納します。
-                        depthFrame.CopyFrameDataToArray(this.depthFrameData);
-
-                        // 深度センサーの観測可能範囲は、0.5 - 4.5 mです。
-                        // そのため、MinDepth は、500 (mm)
-                        // MaxValue は、65535 (mm)としています。
-                        // MaxValue に対して、4.5 m より十分大きな値が格納されているのでは、Kinect の深度取得可能範囲を
-                        // 包含できるようにするためです。
-
-                        minDepth = depthFrame.DepthMinReliableDistance;
-                        maxDepth = ushort.MaxValue;
-
-                        // もし Kinect センサーで定義されている、深度情報の取得可能な区間を格納したい場合は下記のコメントを外して下さい。
-                        //// maxDepth = depthFrame.DepthMaxReliableDistance
-                        
-                        depthFrameProcessed = true;
-                    }
-                }
-            }
-
-            // 深度情報を元に描画処理を実行します。
-            if (depthFrameProcessed)
-            {
-                //深度情報を、RGB 値に変換します。
-                ConvertDepthData(minDepth, maxDepth);
-
-                //変換したデータを画面に描画します。
-                RenderDepthPixels(this.depthPixels);
-            }
-        }
-
-        /// <summary>
-        /// フレーム内の深度情報を RGB 値に変換します。
-        /// </summary>
-        /// <param name="frame"></param>
-        private void ConvertDepthData(ushort minDepth, ushort maxDepth)
-        {
-            int colorPixelIndex = 0;
-
-            // フレーム内に存在する 512 * 424 ピクセルの各深度データに対して、RGB 値に変換する処理を実行します。 
-            for (int i = 0; i < this.depthFrameData.Length; ++i)
-            {
-                ushort depth = this.depthFrameData[i];
-
-                // 深度情報を、RGB 値に変換できるように補正処理します。
-                byte intensity = (byte)(depth >= minDepth && depth <= maxDepth ? (depth / MapDepthToByte) : 0);
-
-                //上記で求めた、intensity の値を、下記に RGB 値として入力します。
-
-                this.depthPixels[colorPixelIndex++] = intensity;
-
-                this.depthPixels[colorPixelIndex++] = intensity;
-
-                this.depthPixels[colorPixelIndex++] = intensity;
-
-                this.depthPixels[colorPixelIndex++] = 255;
-            }
-        }
-
-        /// <summary>
-        /// 画面への描画処理を実行します。
-        /// </summary>
-        /// <param name="pixels">pixel data</param>
-        private void RenderDepthPixels(byte[] pixels)
-        {
-            pixels.CopyTo(this.bitmap.PixelBuffer);
-            this.bitmap.Invalidate();
-            theImage.Source = this.bitmap;
-        }
-
-        /// <summary>
         /// Kinect センサーの状態が変わったときに呼び出されます。
         /// </summary>
         /// <param name="sender">object sending the event</param>
@@ -275,5 +384,7 @@ namespace Microsoft.Samples.Kinect.FaceBasics
             this.StatusText = this.kinectSensor.IsAvailable ? resourceLoader.GetString("RunningStatusText")
                                                             : resourceLoader.GetString("SensorNotAvailableStatusText");
         }
+
+       
     }
 }
